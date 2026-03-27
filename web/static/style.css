@@ -1,0 +1,17 @@
+body {
+  font-family: system-ui, sans-serif;
+}
+
+.navbar-brand {
+  letter-spacing: 0.05em;
+}
+
+.form-range::-webkit-slider-thumb {
+  background: #198754;
+}
+
+.sticky-top {
+  top: 0;
+  z-index: 1;
+  background-color: #343a40;
+}

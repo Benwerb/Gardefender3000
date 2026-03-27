@@ -38,13 +38,15 @@ GAIN = 0.04
 # Camera setup
 # -------------------------
 picam2 = Picamera2()
-picam2.preview_configuration.main.size = (384, 384)
+picam2.preview_configuration.main.size = (1280, 720)
 picam2.preview_configuration.main.format = "RGB888"
 picam2.preview_configuration.align()
 picam2.configure("preview")
 picam2.start()
 
-frame_height, frame_width = 384, 384
+# YOLO runs at a fixed square resolution; camera captures wider for display
+YOLO_SIZE = 384
+frame_height, frame_width = YOLO_SIZE, YOLO_SIZE
 center_x = frame_width // 2
 center_y = frame_height // 2 - 65
 
@@ -77,6 +79,15 @@ detection_buffer = deque(maxlen=DETECTION_BUFFER_SIZE)
 
 # No stability check - fire immediately when centered
 centered_frame_count = 0
+
+# -------------------------
+# Motion detection gate
+# -------------------------
+bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+    history=50, varThreshold=40, detectShadows=False
+)
+MOTION_MIN_AREA = 500   # ignore tiny pixel noise (wind, lighting changes)
+IDLE_SLEEP_MS = 150     # ms to sleep per cycle when no motion detected
 
 # -------------------------
 # Detection folders and frame capture
@@ -128,7 +139,10 @@ try:
     
     while True:
         frame = picam2.capture_array()
-        frame_display = frame.copy()
+        frame_display = frame.copy()  # kept at 720p for display and saving
+        frame_small = cv2.resize(frame, (YOLO_SIZE, YOLO_SIZE))  # for motion diff and YOLO
+        scale_x = frame.shape[1] / YOLO_SIZE  # ~3.33 for 1280→384
+        scale_y = frame.shape[0] / YOLO_SIZE  # ~1.875 for 720→384
         
         # Add frame to post-fire buffer (always keep last 10 frames ready)
         post_fire_buffer.append(frame_display.copy())
@@ -142,10 +156,20 @@ try:
                 print(f"Saved {FRAMES_TO_SAVE_AFTER_FIRE} frames to {current_detection_folder}")
                 current_detection_folder = None
 
+        # Motion gate: skip YOLO if nothing changed in the scene
+        fg_mask = bg_subtractor.apply(frame_small)
+        motion_pixels = cv2.countNonZero(fg_mask)
+        if motion_pixels < MOTION_MIN_AREA and frames_to_save_count == 0:
+            cv2.putText(frame_display, "IDLE", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+            cv2.imshow("Person Tracking", frame_display)
+            if cv2.waitKey(IDLE_SLEEP_MS) & 0xFF == ord('q'):
+                break
+            continue
+
         # YOLO inference with more aggressive settings
         results = model.predict(
-            frame, 
-            imgsz=384, 
+            frame_small,
+            imgsz=YOLO_SIZE,
             verbose=False,
             conf=MIN_CONFIDENCE,  # Pre-filter at model level
             iou=0.5,  # Non-max suppression threshold
@@ -167,9 +191,10 @@ try:
                 if is_valid:
                     valid_detections.append((boxes[i], confs[i], class_id))
                 else:
-                    # Draw rejected detections in red for debugging
-                    cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 1)
-                    cv2.putText(frame_display, f"X: {reason}", (int(x1), int(y1)-5),
+                    # Draw rejected detections in red for debugging (scale to display coords)
+                    dx1, dy1, dx2, dy2 = int(x1*scale_x), int(y1*scale_y), int(x2*scale_x), int(y2*scale_y)
+                    cv2.rectangle(frame_display, (dx1, dy1), (dx2, dy2), (0, 0, 255), 1)
+                    cv2.putText(frame_display, f"X: {reason}", (dx1, dy1-5),
                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
                     # Print debug info
                     width = x2 - x1
@@ -187,15 +212,18 @@ try:
             obj_x = int((x1 + x2) / 2)
             obj_y = int((y1 + y2) / 2)
 
-            # Draw valid detection in green
-            cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-            cv2.putText(frame_display, f"{CLASS_NAMES[class_id]} {conf:.2f}", (int(x1), int(y1)-5),
+            # Draw valid detection in green (scale to display coords)
+            dx1, dy1 = int(x1*scale_x), int(y1*scale_y)
+            dx2, dy2 = int(x2*scale_x), int(y2*scale_y)
+            cv2.rectangle(frame_display, (dx1, dy1), (dx2, dy2), (0, 255, 0), 2)
+            cv2.putText(frame_display, f"{CLASS_NAMES[class_id]} {conf:.2f}", (dx1, dy1-5),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            
-            # Draw center crosshair
-            size = 6
-            cv2.line(frame_display, (obj_x - size, obj_y), (obj_x + size, obj_y), (0, 0, 255), 2)
-            cv2.line(frame_display, (obj_x, obj_y - size), (obj_x, obj_y + size), (0, 0, 255), 2)
+
+            # Draw center crosshair (scale to display coords)
+            dobj_x, dobj_y = int(obj_x * scale_x), int(obj_y * scale_y)
+            size = 10
+            cv2.line(frame_display, (dobj_x - size, dobj_y), (dobj_x + size, dobj_y), (0, 0, 255), 2)
+            cv2.line(frame_display, (dobj_x, dobj_y - size), (dobj_x, dobj_y + size), (0, 0, 255), 2)
 
             # Compute error
             error_x = obj_x - center_x
@@ -250,9 +278,10 @@ try:
             # No detection - reset counters
             centered_frame_count = 0
 
-        # Draw target center
-        cv2.circle(frame_display, (center_x, center_y), 5, (255, 0, 0), 2)
-        cv2.circle(frame_display, (center_x, center_y), TOLERANCE, (255, 0, 0), 1)
+        # Draw target center (scale to display coords)
+        dcenter_x, dcenter_y = int(center_x * scale_x), int(center_y * scale_y)
+        cv2.circle(frame_display, (dcenter_x, dcenter_y), 5, (255, 0, 0), 2)
+        cv2.circle(frame_display, (dcenter_x, dcenter_y), int(TOLERANCE * scale_x), (255, 0, 0), 1)
 
         # Display FPS and stats
         inference_time = results[0].speed['inference']

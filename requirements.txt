@@ -1,0 +1,13 @@
+# Core dependencies
+opencv-python
+numpy
+ultralytics
+gpiozero
+
+# Raspberry Pi only (install on Pi)
+picamera2
+adafruit-circuitpython-servokit
+
+# Web interface
+flask
+gunicorn
