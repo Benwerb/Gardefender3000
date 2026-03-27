@@ -51,6 +51,19 @@
       </div>
     </div>
 
+    <!-- Detection gallery -->
+    <div class="card bg-secondary text-light mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        Detection Gallery
+        <span class="badge bg-dark" id="detection-count">—</span>
+      </div>
+      <div class="card-body">
+        <div id="detection-gallery" class="row g-2">
+          <div class="col text-center text-white-50 py-3">Loading…</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Log table -->
     <div class="card bg-secondary text-light">
       <div class="card-header">Recent Watering Events</div>
@@ -75,6 +88,22 @@
 
   </div>
 
+  <!-- Detection event modal -->
+  <div class="modal fade" id="detection-modal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content bg-dark text-light">
+        <div class="modal-header border-secondary">
+          <h5 class="modal-title text-capitalize" id="modal-title"></h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="row g-2" id="modal-frames"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
     let isWatering = false;
 
@@ -154,12 +183,70 @@
       await refreshLog();
     });
 
+    // ── Detection gallery ───────────────────────────────────────────────
+
+    let selectedEvent = null;
+
+    async function refreshGallery() {
+      try {
+        const res = await fetch("/api/detections");
+        const events = await res.json();
+        const gallery = document.getElementById("detection-gallery");
+        document.getElementById("detection-count").textContent = events.length;
+
+        if (!events.length) {
+          gallery.innerHTML = '<div class="col text-center text-white-50 py-3">No detections yet.</div>';
+          return;
+        }
+
+        gallery.innerHTML = events.map((e, i) => `
+          <div class="col-6 col-md-3 col-lg-2">
+            <div class="card bg-dark text-light h-100 detection-card"
+                 style="cursor:pointer"
+                 onclick="openEvent(${i})"
+                 data-index="${i}">
+              <img src="/detections/${e.name}/${e.thumbnail}"
+                   class="card-img-top"
+                   style="object-fit:cover;height:100px;"
+                   loading="lazy">
+              <div class="card-body p-1">
+                <div class="fw-semibold text-capitalize small">${e.label}</div>
+                <div class="text-white-50" style="font-size:0.7rem">${e.timestamp}</div>
+                <div class="text-white-50" style="font-size:0.7rem">${e.frames.length} frames</div>
+              </div>
+            </div>
+          </div>
+        `).join("");
+
+        // Store events for modal use
+        window._detectionEvents = events;
+      } catch (e) {
+        console.error("Gallery fetch failed", e);
+      }
+    }
+
+    function openEvent(index) {
+      const e = window._detectionEvents[index];
+      const modal = document.getElementById("detection-modal");
+      document.getElementById("modal-title").textContent = e.label + " — " + e.timestamp;
+      document.getElementById("modal-frames").innerHTML = e.frames.map(f => `
+        <div class="col-6 col-md-4">
+          <img src="/detections/${e.name}/${f}"
+               class="img-fluid rounded"
+               loading="lazy">
+        </div>
+      `).join("");
+      new bootstrap.Modal(modal).show();
+    }
+
     // Initial load + poll every 5s
     refreshStatus();
     refreshLog();
+    refreshGallery();
     setInterval(async () => {
       await refreshStatus();
       await refreshLog();
+      await refreshGallery();
     }, 5000);
   </script>
 

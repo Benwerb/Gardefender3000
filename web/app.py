@@ -1,4 +1,5 @@
 import sys
+import os
 import threading
 import sqlite3
 from datetime import datetime, timezone
@@ -7,7 +8,7 @@ from pathlib import Path
 
 from flask import (
     Flask, render_template, request, redirect,
-    url_for, session, jsonify,
+    url_for, session, jsonify, send_from_directory,
 )
 
 # Allow importing water_plants from the project root
@@ -18,10 +19,11 @@ import water_plants
 def create_app():
     app = Flask(__name__)
 
-    from web.config import SECRET_KEY, PASSWORD, DATABASE_PATH
+    from web.config import SECRET_KEY, PASSWORD, DATABASE_PATH, DETECTIONS_PATH
     app.secret_key = SECRET_KEY
     app.config["PASSWORD"] = PASSWORD
     app.config["DATABASE_PATH"] = DATABASE_PATH
+    app.config["DETECTIONS_PATH"] = DETECTIONS_PATH
 
     # Ensure DB + table exist on startup
     water_plants.init_db(Path(DATABASE_PATH))
@@ -110,6 +112,35 @@ def create_app():
         db_path = Path(app.config["DATABASE_PATH"])
         rows = _get_recent_waterings(db_path)
         return jsonify(rows)
+
+    @app.route("/api/detections")
+    @login_required
+    def api_detections():
+        detections_dir = Path(app.config["DETECTIONS_PATH"])
+        if not detections_dir.exists():
+            return jsonify([])
+        events = []
+        for folder in sorted(detections_dir.iterdir(), reverse=True):
+            if not folder.is_dir():
+                continue
+            frames = sorted(f.name for f in folder.iterdir() if f.suffix == ".jpg")
+            if not frames:
+                continue
+            # folder name format: <class>_<YYYYMMDD_HHMMSS>
+            parts = folder.name.split("_", 1)
+            events.append({
+                "name": folder.name,
+                "label": parts[0] if len(parts) == 2 else folder.name,
+                "timestamp": parts[1].replace("_", " ") if len(parts) == 2 else "",
+                "frames": frames,
+                "thumbnail": frames[0],
+            })
+        return jsonify(events)
+
+    @app.route("/detections/<path:filename>")
+    @login_required
+    def serve_detection(filename):
+        return send_from_directory(app.config["DETECTIONS_PATH"], filename)
 
     return app
 
