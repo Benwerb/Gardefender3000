@@ -6,299 +6,281 @@ from adafruit_servokit import ServoKit
 from gpiozero import LED
 import time
 import os
+import threading
 from collections import deque
 from datetime import datetime
 
-# to add: text updates, reset back to center after shooting
-# -------------------------
-# Servo setup
-# -------------------------
-kit = ServoKit(channels=16)
-kit.servo[0].set_pulse_width_range(500, 2550)  # Pan
-kit.servo[1].set_pulse_width_range(500, 2550)  # Tilt
 
-pan_channel = 0
-tilt_channel = 1
-PAN_MIN, PAN_MAX = 0, 175
-TILT_MIN, TILT_MAX = 80, 175
+def run_loop(state: dict, frame_lock: threading.Lock) -> None:
+    """
+    Main garden defender loop. Runs in a background thread.
 
-PAN_CENTER = (PAN_MIN + PAN_MAX) // 2
-TILT_CENTER = 135
-pan_angle = PAN_CENTER
-tilt_angle = TILT_CENTER
-kit.servo[pan_channel].angle = pan_angle
-kit.servo[tilt_channel].angle = tilt_angle
+    state keys (read/write):
+        running (bool)       – set False to stop
+        mode (str)           – "auto" | "manual"
+        latest_frame (bytes) – latest JPEG, written each frame
+        moving_pan (int)     – -1 / 0 / 1, continuous pan direction (manual)
+        moving_tilt (int)    – -1 / 0 / 1, continuous tilt direction (manual)
+        manual_fire (bool)   – True to fire once (manual)
+    """
 
-# Servo movement parameters
-TOLERANCE = 25
-MAX_JUMP = 8
-GAIN = 0.04
+    # ── Servo setup ───────────────────────────────────────────────────────
+    kit = ServoKit(channels=16)
+    kit.servo[0].set_pulse_width_range(500, 2550)  # Pan
+    kit.servo[1].set_pulse_width_range(500, 2550)  # Tilt
 
-# -------------------------
-# Camera setup
-# -------------------------
-picam2 = Picamera2()
-picam2.preview_configuration.main.size = (1280, 720)
-picam2.preview_configuration.main.format = "RGB888"
-picam2.preview_configuration.align()
-picam2.configure("preview")
-picam2.start()
+    pan_channel = 0
+    tilt_channel = 1
+    PAN_MIN,  PAN_MAX  = 0, 175
+    TILT_MIN, TILT_MAX = 80, 175
+    PAN_CENTER  = (PAN_MIN + PAN_MAX) // 2
+    TILT_CENTER = 135
+    pan_angle  = PAN_CENTER
+    tilt_angle = TILT_CENTER
+    kit.servo[pan_channel].angle  = pan_angle
+    kit.servo[tilt_channel].angle = tilt_angle
 
-# YOLO runs at a fixed square resolution; camera captures wider for display
-YOLO_SIZE = 384
-frame_height, frame_width = YOLO_SIZE, YOLO_SIZE
-center_x = frame_width // 2
-center_y = frame_height // 2 - 65
+    TOLERANCE = 25
+    MAX_JUMP  = 8
+    GAIN      = 0.04
+    MANUAL_SPEED = 3  # degrees per frame in manual mode
 
-# -------------------------
-# MOSFET setup
-# -------------------------
-bang = LED(17)
-last_fire = 0
-FIRE_COOLDOWN = 2  # seconds
+    # ── Camera setup ──────────────────────────────────────────────────────
+    picam2 = Picamera2()
+    picam2.preview_configuration.main.size   = (1280, 720)
+    picam2.preview_configuration.main.format = "RGB888"
+    picam2.preview_configuration.align()
+    picam2.configure("preview")
+    picam2.start()
 
-# -------------------------
-# YOLO model with optimized settings
-# -------------------------
-model = YOLO("yolo11n_ncnn_model")
+    YOLO_SIZE = 384
+    center_x  = YOLO_SIZE // 2
+    center_y  = YOLO_SIZE // 2 - 65
 
-# -------------------------
-# Detection parameters (IMPROVED)
-# -------------------------
-TARGET_CLASSES = {0, 15, 16, 17}  # person, bird, cat, dog
-CLASS_NAMES = {0: "person", 15: "bird", 16: "cat", 17: "dog"}
+    # ── MOSFET / gun setup ────────────────────────────────────────────────
+    bang      = LED(17)
+    last_fire = 0
+    FIRE_COOLDOWN = 2  # seconds
 
-MIN_CONFIDENCE = 0.30  # Detection threshold
-MIN_BOX_AREA = 1500    # Minimum pixels to filter tiny detections
-MAX_BOX_AREA = 120000  # Maximum pixels to filter unrealistic large detections
+    # ── YOLO model ────────────────────────────────────────────────────────
+    model = YOLO("yolo11n_ncnn_model")
 
-# Temporal filtering: require consistent detections
-DETECTION_BUFFER_SIZE = 5  # Track last 5 frames
-MIN_DETECTIONS_TO_TRACK = 2  # At least 2 out of 5 frames (was 3)
-detection_buffer = deque(maxlen=DETECTION_BUFFER_SIZE)
+    # ── Detection parameters ──────────────────────────────────────────────
+    TARGET_CLASSES = {0, 15, 16, 17}
+    CLASS_NAMES    = {0: "person", 15: "bird", 16: "cat", 17: "dog"}
+    MIN_CONFIDENCE = 0.30
+    MIN_BOX_AREA   = 1500
+    MAX_BOX_AREA   = 120000
 
-# No stability check - fire immediately when centered
-centered_frame_count = 0
+    centered_frame_count = 0
 
-# -------------------------
-# Motion detection gate
-# -------------------------
-bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-    history=50, varThreshold=40, detectShadows=False
-)
-MOTION_MIN_AREA = 500   # ignore tiny pixel noise (wind, lighting changes)
-IDLE_SLEEP_MS = 150     # ms to sleep per cycle when no motion detected
+    # ── Motion gate ───────────────────────────────────────────────────────
+    bg_subtractor  = cv2.createBackgroundSubtractorMOG2(
+        history=50, varThreshold=40, detectShadows=False
+    )
+    MOTION_MIN_AREA = 500
+    IDLE_SLEEP_S    = 0.15
 
-# -------------------------
-# Detection folders and frame capture
-# -------------------------
-base_folder = "detections"
-os.makedirs(base_folder, exist_ok=True)
+    # ── Detection saving ──────────────────────────────────────────────────
+    base_folder = "detections"
+    os.makedirs(base_folder, exist_ok=True)
+    FRAMES_TO_SAVE       = 10
+    post_fire_buffer     = deque(maxlen=FRAMES_TO_SAVE)
+    frames_to_save_count = 0
+    current_detection_folder = None
 
-# Frame buffer to save post-fire frames
-FRAMES_TO_SAVE_AFTER_FIRE = 10
-post_fire_buffer = deque(maxlen=FRAMES_TO_SAVE_AFTER_FIRE)
-frames_to_save_count = 0
-current_detection_folder = None
+    def is_valid_detection(x1, y1, x2, y2, conf, class_id):
+        if class_id not in TARGET_CLASSES:
+            return False, "Not target class"
+        if conf < MIN_CONFIDENCE:
+            return False, "Low confidence"
+        area = (x2 - x1) * (y2 - y1)
+        if area < MIN_BOX_AREA:
+            return False, f"Too small (area={area:.0f})"
+        if area > MAX_BOX_AREA:
+            return False, f"Too large (area={area:.0f})"
+        return True, "Valid"
 
-# -------------------------
-# Helper function: Validate detection quality
-# -------------------------
-def is_valid_detection(x1, y1, x2, y2, conf, class_id):
-    """Apply validation checks to reduce false positives"""
-    
-    # Check if target class
-    if class_id not in TARGET_CLASSES:
-        return False, "Not target class"
-    
-    # Check confidence
-    if conf < MIN_CONFIDENCE:
-        return False, "Low confidence"
-    
-    # Calculate dimensions
-    width = x2 - x1
-    height = y2 - y1
-    area = width * height
-    
-    # Check area bounds
-    if area < MIN_BOX_AREA:
-        return False, f"Too small (area={area:.0f})"
-    if area > MAX_BOX_AREA:
-        return False, f"Too large (area={area:.0f})"
-    
-    return True, "Valid"
+    def encode_frame(frame_bgr):
+        """Encode a BGR frame as JPEG bytes."""
+        _, jpeg = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        return jpeg.tobytes()
 
-# -------------------------
-# Main loop
-# -------------------------
-try:
-    print("Starting animal tracker - fires immediately when centered...")
+    print("Garden defender loop starting…")
     print(f"Target classes: {[CLASS_NAMES[c] for c in TARGET_CLASSES]}")
-    print(f"Min confidence: {MIN_CONFIDENCE}, Tolerance: {TOLERANCE}px")
-    print(f"Fire cooldown: {FIRE_COOLDOWN}s")
-    
-    while True:
-        frame = picam2.capture_array()
-        frame_display = frame.copy()  # kept at 720p for display and saving
-        frame_small = cv2.resize(frame, (YOLO_SIZE, YOLO_SIZE))  # for motion diff and YOLO
-        scale_x = frame.shape[1] / YOLO_SIZE  # ~3.33 for 1280→384
-        scale_y = frame.shape[0] / YOLO_SIZE  # ~1.875 for 720→384
-        
-        # Add frame to post-fire buffer (always keep last 10 frames ready)
-        post_fire_buffer.append(frame_display.copy())
-        
-        # If we're in post-fire saving mode, save frames
-        if frames_to_save_count > 0:
-            frame_filename = os.path.join(current_detection_folder, f"frame_{FRAMES_TO_SAVE_AFTER_FIRE - frames_to_save_count + 1:02d}.jpg")
-            cv2.imwrite(frame_filename, frame_display)
-            frames_to_save_count -= 1
-            if frames_to_save_count == 0:
-                print(f"Saved {FRAMES_TO_SAVE_AFTER_FIRE} frames to {current_detection_folder}")
-                current_detection_folder = None
 
-        # Motion gate: skip YOLO if nothing changed in the scene
-        fg_mask = bg_subtractor.apply(frame_small)
-        motion_pixels = cv2.countNonZero(fg_mask)
-        if motion_pixels < MOTION_MIN_AREA and frames_to_save_count == 0:
-            cv2.putText(frame_display, "IDLE", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
-            cv2.imshow("Person Tracking", frame_display)
-            if cv2.waitKey(IDLE_SLEEP_MS) & 0xFF == ord('q'):
-                break
-            continue
+    try:
+        while state.get("running", True):
+            frame       = picam2.capture_array()
+            frame_display = frame.copy()
+            frame_small = cv2.resize(frame, (YOLO_SIZE, YOLO_SIZE))
+            scale_x     = frame.shape[1] / YOLO_SIZE
+            scale_y     = frame.shape[0] / YOLO_SIZE
 
-        # YOLO inference with more aggressive settings
-        results = model.predict(
-            frame_small,
-            imgsz=YOLO_SIZE,
-            verbose=False,
-            conf=MIN_CONFIDENCE,  # Pre-filter at model level
-            iou=0.5,  # Non-max suppression threshold
-            agnostic_nms=False
-        )
-        
-        boxes = results[0].boxes.xyxy.cpu().numpy()
-        classes = results[0].boxes.cls.cpu().numpy()
-        confs = results[0].boxes.conf.cpu().numpy()
-        
-        # Filter for target animals and apply validation
-        valid_detections = []
-        for i in range(len(boxes)):
-            class_id = int(classes[i])
-            if class_id in TARGET_CLASSES:
-                x1, y1, x2, y2 = boxes[i]
-                is_valid, reason = is_valid_detection(x1, y1, x2, y2, confs[i], class_id)
-                
-                if is_valid:
-                    valid_detections.append((boxes[i], confs[i], class_id))
+            post_fire_buffer.append(frame_display.copy())
+
+            # Save post-fire frames
+            if frames_to_save_count > 0:
+                idx = FRAMES_TO_SAVE - frames_to_save_count + 1
+                cv2.imwrite(
+                    os.path.join(current_detection_folder, f"frame_{idx:02d}.jpg"),
+                    frame_display,
+                )
+                frames_to_save_count -= 1
+                if frames_to_save_count == 0:
+                    print(f"Saved {FRAMES_TO_SAVE} frames to {current_detection_folder}")
+                    current_detection_folder = None
+
+            # ── MANUAL MODE ───────────────────────────────────────────────
+            if state.get("mode") == "manual":
+                pan_dir  = state.get("moving_pan",  0)
+                tilt_dir = state.get("moving_tilt", 0)
+
+                if pan_dir:
+                    pan_angle = max(PAN_MIN,  min(PAN_MAX,  pan_angle  + pan_dir  * MANUAL_SPEED))
+                    kit.servo[pan_channel].angle = pan_angle
+
+                if tilt_dir:
+                    tilt_angle = max(TILT_MIN, min(TILT_MAX, tilt_angle + tilt_dir * MANUAL_SPEED))
+                    kit.servo[tilt_channel].angle = tilt_angle
+
+                if state.get("manual_fire"):
+                    current_time = time.time()
+                    if current_time - last_fire > FIRE_COOLDOWN:
+                        bang.blink(on_time=1, off_time=0, n=1)
+                        last_fire = current_time
+                        print("Manual fire!")
+                    state["manual_fire"] = False
+
+                cv2.putText(frame_display, "MANUAL", (10, 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                with frame_lock:
+                    state["latest_frame"] = encode_frame(frame_display)
+                time.sleep(1 / 30)
+                continue
+
+            # ── AUTO MODE — motion gate ────────────────────────────────────
+            fg_mask       = bg_subtractor.apply(frame_small)
+            motion_pixels = cv2.countNonZero(fg_mask)
+            if motion_pixels < MOTION_MIN_AREA and frames_to_save_count == 0:
+                cv2.putText(frame_display, "IDLE", (10, 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (128, 128, 128), 2)
+                with frame_lock:
+                    state["latest_frame"] = encode_frame(frame_display)
+                time.sleep(IDLE_SLEEP_S)
+                continue
+
+            # ── AUTO MODE — YOLO inference ────────────────────────────────
+            results = model.predict(
+                frame_small,
+                imgsz=YOLO_SIZE,
+                verbose=False,
+                conf=MIN_CONFIDENCE,
+                iou=0.5,
+                agnostic_nms=False,
+            )
+
+            boxes   = results[0].boxes.xyxy.cpu().numpy()
+            classes = results[0].boxes.cls.cpu().numpy()
+            confs   = results[0].boxes.conf.cpu().numpy()
+
+            valid_detections = []
+            for i in range(len(boxes)):
+                class_id = int(classes[i])
+                if class_id in TARGET_CLASSES:
+                    x1, y1, x2, y2 = boxes[i]
+                    is_valid, reason = is_valid_detection(x1, y1, x2, y2, confs[i], class_id)
+                    if is_valid:
+                        valid_detections.append((boxes[i], confs[i], class_id))
+                    else:
+                        dx1, dy1 = int(x1*scale_x), int(y1*scale_y)
+                        dx2, dy2 = int(x2*scale_x), int(y2*scale_y)
+                        cv2.rectangle(frame_display, (dx1, dy1), (dx2, dy2), (0, 0, 255), 1)
+                        cv2.putText(frame_display, f"X: {reason}", (dx1, dy1-5),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+                        area = (x2-x1)*(y2-y1)
+                        print(f"REJECTED: {CLASS_NAMES[class_id]} - {reason} | "
+                              f"Conf: {confs[i]:.2f}, Area: {area:.0f}")
+
+            if valid_detections:
+                areas = [(b[2]-b[0])*(b[3]-b[1]) for b, _, _ in valid_detections]
+                i = areas.index(max(areas))
+                (x1, y1, x2, y2), conf, class_id = valid_detections[i]
+
+                obj_x = int((x1 + x2) / 2)
+                obj_y = int((y1 + y2) / 2)
+
+                dx1, dy1 = int(x1*scale_x), int(y1*scale_y)
+                dx2, dy2 = int(x2*scale_x), int(y2*scale_y)
+                cv2.rectangle(frame_display, (dx1, dy1), (dx2, dy2), (0, 255, 0), 2)
+                cv2.putText(frame_display, f"{CLASS_NAMES[class_id]} {conf:.2f}",
+                            (dx1, dy1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                dobj_x, dobj_y = int(obj_x*scale_x), int(obj_y*scale_y)
+                cv2.line(frame_display, (dobj_x-10, dobj_y), (dobj_x+10, dobj_y), (0, 0, 255), 2)
+                cv2.line(frame_display, (dobj_x, dobj_y-10), (dobj_x, dobj_y+10), (0, 0, 255), 2)
+
+                error_x = obj_x - center_x
+                error_y = obj_y - center_y
+
+                if abs(error_x) > TOLERANCE:
+                    pan_angle -= np.clip(error_x * GAIN, -MAX_JUMP, MAX_JUMP)
+                    pan_angle = max(PAN_MIN, min(PAN_MAX, pan_angle))
+                    kit.servo[pan_channel].angle = pan_angle
+
+                if abs(error_y) > TOLERANCE:
+                    tilt_angle += np.clip(error_y * GAIN, -MAX_JUMP, MAX_JUMP)
+                    tilt_angle = max(TILT_MIN, min(TILT_MAX, tilt_angle))
+                    kit.servo[tilt_channel].angle = tilt_angle
+
+                current_time = time.time()
+                if abs(error_x) < TOLERANCE and abs(error_y) < TOLERANCE:
+                    centered_frame_count += 1
+                    cv2.putText(frame_display, "CENTERED - READY TO FIRE",
+                                (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                    if current_time - last_fire > FIRE_COOLDOWN and frames_to_save_count == 0:
+                        timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        folder_name = f"{CLASS_NAMES[class_id]}_{timestamp}"
+                        current_detection_folder = os.path.join(base_folder, folder_name)
+                        os.makedirs(current_detection_folder, exist_ok=True)
+
+                        for idx, buf_frame in enumerate(post_fire_buffer):
+                            cv2.imwrite(
+                                os.path.join(current_detection_folder, f"frame_{idx+1:02d}.jpg"),
+                                buf_frame,
+                            )
+
+                        frames_to_save_count = FRAMES_TO_SAVE
+                        bang.blink(on_time=1, off_time=0, n=1)
+                        last_fire = current_time
+                        print(f"FIRING at {CLASS_NAMES[class_id]}! "
+                              f"Conf: {conf:.2f}, Area: {areas[i]:.0f} | Folder: {folder_name}")
                 else:
-                    # Draw rejected detections in red for debugging (scale to display coords)
-                    dx1, dy1, dx2, dy2 = int(x1*scale_x), int(y1*scale_y), int(x2*scale_x), int(y2*scale_y)
-                    cv2.rectangle(frame_display, (dx1, dy1), (dx2, dy2), (0, 0, 255), 1)
-                    cv2.putText(frame_display, f"X: {reason}", (dx1, dy1-5),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-                    # Print debug info
-                    width = x2 - x1
-                    height = y2 - y1
-                    area = width * height
-                    print(f"REJECTED: {CLASS_NAMES[class_id]} - {reason} | Conf: {confs[i]:.2f}, Area: {area:.0f}, Box: ({int(x1)},{int(y1)})-({int(x2)},{int(y2)})")
-        
-        # Track immediately if any valid detection exists
-        if len(valid_detections) > 0:
-            # Track largest valid target
-            areas = [(box[2] - box[0]) * (box[3] - box[1]) for box, conf, class_id in valid_detections]
-            i = areas.index(max(areas))
-            (x1, y1, x2, y2), conf, class_id = valid_detections[i]
-            
-            obj_x = int((x1 + x2) / 2)
-            obj_y = int((y1 + y2) / 2)
-
-            # Draw valid detection in green (scale to display coords)
-            dx1, dy1 = int(x1*scale_x), int(y1*scale_y)
-            dx2, dy2 = int(x2*scale_x), int(y2*scale_y)
-            cv2.rectangle(frame_display, (dx1, dy1), (dx2, dy2), (0, 255, 0), 2)
-            cv2.putText(frame_display, f"{CLASS_NAMES[class_id]} {conf:.2f}", (dx1, dy1-5),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-            # Draw center crosshair (scale to display coords)
-            dobj_x, dobj_y = int(obj_x * scale_x), int(obj_y * scale_y)
-            size = 10
-            cv2.line(frame_display, (dobj_x - size, dobj_y), (dobj_x + size, dobj_y), (0, 0, 255), 2)
-            cv2.line(frame_display, (dobj_x, dobj_y - size), (dobj_x, dobj_y + size), (0, 0, 255), 2)
-
-            # Compute error
-            error_x = obj_x - center_x
-            error_y = obj_y - center_y
-
-            # PAN
-            if abs(error_x) > TOLERANCE:
-                delta = np.clip(error_x * GAIN, -MAX_JUMP, MAX_JUMP)
-                pan_angle -= delta
-                pan_angle = max(PAN_MIN, min(PAN_MAX, pan_angle))
-                kit.servo[pan_channel].angle = pan_angle
-
-            # TILT
-            if abs(error_y) > TOLERANCE:
-                delta = np.clip(error_y * GAIN, -MAX_JUMP, MAX_JUMP)
-                tilt_angle += delta
-                tilt_angle = max(TILT_MIN, min(TILT_MAX, tilt_angle))
-                kit.servo[tilt_channel].angle = tilt_angle
-
-            # Check if centered and fire immediately
-            current_time = time.time()
-            if abs(error_x) < TOLERANCE and abs(error_y) < TOLERANCE:
-                centered_frame_count += 1
-                
-                # Display centered status
-                cv2.putText(frame_display, f"CENTERED - READY TO FIRE", 
-                          (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                
-                # Fire immediately if cooldown period has passed
-                if current_time - last_fire > FIRE_COOLDOWN and frames_to_save_count == 0:
-                    # Create detection folder with class_date_time naming
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    folder_name = f"{CLASS_NAMES[class_id]}_{timestamp}"
-                    current_detection_folder = os.path.join(base_folder, folder_name)
-                    os.makedirs(current_detection_folder, exist_ok=True)
-                    
-                    # Save all buffered frames immediately
-                    for idx, buffered_frame in enumerate(post_fire_buffer):
-                        frame_filename = os.path.join(current_detection_folder, f"frame_{idx+1:02d}.jpg")
-                        cv2.imwrite(frame_filename, buffered_frame)
-                    
-                    # Set counter to save next frames
-                    frames_to_save_count = FRAMES_TO_SAVE_AFTER_FIRE
-                    
-                    # Fire the gun
-                    bang.blink(on_time=1, off_time=0, n=1)
-                    last_fire = current_time
-                    print(f"FIRING at {CLASS_NAMES[class_id]}! Conf: {conf:.2f}, Area: {areas[i]:.0f} | Folder: {folder_name}")
+                    centered_frame_count = 0
             else:
                 centered_frame_count = 0
-        else:
-            # No detection - reset counters
-            centered_frame_count = 0
 
-        # Draw target center (scale to display coords)
-        dcenter_x, dcenter_y = int(center_x * scale_x), int(center_y * scale_y)
-        cv2.circle(frame_display, (dcenter_x, dcenter_y), 5, (255, 0, 0), 2)
-        cv2.circle(frame_display, (dcenter_x, dcenter_y), int(TOLERANCE * scale_x), (255, 0, 0), 1)
+            # Draw aim target
+            dcenter_x = int(center_x * scale_x)
+            dcenter_y = int(center_y * scale_y)
+            cv2.circle(frame_display, (dcenter_x, dcenter_y), 5, (255, 0, 0), 2)
+            cv2.circle(frame_display, (dcenter_x, dcenter_y), int(TOLERANCE * scale_x), (255, 0, 0), 1)
 
-        # Display FPS and stats
-        inference_time = results[0].speed['inference']
-        fps = 1000 / inference_time if inference_time > 0 else 0
-        cv2.putText(frame_display, f'FPS: {fps:.1f}', (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            inference_time = results[0].speed["inference"]
+            fps = 1000 / inference_time if inference_time > 0 else 0
+            cv2.putText(frame_display, f"FPS: {fps:.1f}", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        # Show frame
-        cv2.imshow("Person Tracking", frame_display)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            with frame_lock:
+                state["latest_frame"] = encode_frame(frame_display)
 
-except KeyboardInterrupt:
-    print("Exiting...")
-
-finally:
-    cv2.destroyAllWindows()
-    bang.off()
-    kit.servo[pan_channel].angle = PAN_CENTER
-    kit.servo[tilt_channel].angle = TILT_CENTER
+    except Exception as e:
+        print(f"Garden defender loop error: {e}")
+        raise
+    finally:
+        bang.off()
+        kit.servo[pan_channel].angle  = PAN_CENTER
+        kit.servo[tilt_channel].angle = TILT_CENTER
+        picam2.stop()
+        print("Garden defender loop stopped.")

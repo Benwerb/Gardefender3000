@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manual Control — Gardefender 3000</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background: #000; color: #fff; user-select: none; }
+    #video-container {
+      position: relative;
+      display: inline-block;
+      width: 100%;
+      max-width: 900px;
+    }
+    #video-feed {
+      width: 100%;
+      display: block;
+      border: 2px solid #333;
+    }
+    #crosshair {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    #mode-badge {
+      position: absolute;
+      top: 10px; left: 10px;
+      font-size: 0.8rem;
+      padding: 3px 8px;
+    }
+    #hint {
+      position: absolute;
+      bottom: 10px; left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.5);
+      white-space: nowrap;
+    }
+    .key-hint {
+      display: inline-block;
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: monospace;
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body class="d-flex flex-column align-items-center justify-content-start min-vh-100 py-3">
+
+  <div class="d-flex align-items-center gap-3 mb-3 w-100" style="max-width:900px">
+    <a href="{{ url_for('index') }}" class="btn btn-sm btn-outline-secondary">← Dashboard</a>
+    <span class="fw-bold">Manual Control</span>
+    <span id="conn-badge" class="badge bg-danger ms-auto">Disconnected</span>
+    <button id="mode-btn" class="btn btn-sm btn-warning">Switch to Auto</button>
+  </div>
+
+  <div id="video-container">
+    <img id="video-feed" src="{{ url_for('video_feed') }}" alt="Camera feed">
+
+    <!-- Crosshair overlay -->
+    <svg id="crosshair" width="60" height="60" viewBox="0 0 60 60">
+      <line x1="30" y1="0"  x2="30" y2="25" stroke="rgba(0,255,0,0.8)" stroke-width="1.5"/>
+      <line x1="30" y1="35" x2="30" y2="60" stroke="rgba(0,255,0,0.8)" stroke-width="1.5"/>
+      <line x1="0"  y1="30" x2="25" y2="30" stroke="rgba(0,255,0,0.8)" stroke-width="1.5"/>
+      <line x1="35" y1="30" x2="60" y2="30" stroke="rgba(0,255,0,0.8)" stroke-width="1.5"/>
+      <circle cx="30" cy="30" r="5" fill="none" stroke="rgba(0,255,0,0.8)" stroke-width="1.5"/>
+    </svg>
+
+    <span id="mode-badge" class="badge bg-success">MANUAL</span>
+
+    <div id="hint">
+      <span class="key-hint">←→</span> Pan &nbsp;
+      <span class="key-hint">↑↓</span> Tilt &nbsp;
+      <span class="key-hint">Space</span> Fire
+    </div>
+  </div>
+
+  <div id="fire-flash"
+       style="position:fixed;top:0;left:0;width:100%;height:100%;
+              background:rgba(255,80,0,0.35);pointer-events:none;
+              display:none;z-index:999;">
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+    const socket = io();
+    let currentMode = "manual";
+
+    // ── Connection ────────────────────────────────────────────────────────
+    socket.on("connect", () => {
+      document.getElementById("conn-badge").textContent = "Connected";
+      document.getElementById("conn-badge").className = "badge bg-success ms-auto";
+      socket.emit("set_mode", { mode: "manual" });
+    });
+
+    socket.on("disconnect", () => {
+      document.getElementById("conn-badge").textContent = "Disconnected";
+      document.getElementById("conn-badge").className = "badge bg-danger ms-auto";
+    });
+
+    socket.on("mode_changed", (data) => {
+      currentMode = data.mode;
+      const badge = document.getElementById("mode-badge");
+      if (data.mode === "manual") {
+        badge.textContent = "MANUAL";
+        badge.className = "badge bg-success";
+      } else {
+        badge.textContent = "AUTO";
+        badge.className = "badge bg-warning text-dark";
+      }
+    });
+
+    // ── Mode toggle ───────────────────────────────────────────────────────
+    document.getElementById("mode-btn").addEventListener("click", () => {
+      const next = currentMode === "manual" ? "auto" : "manual";
+      socket.emit("set_mode", { mode: next });
+      document.getElementById("mode-btn").textContent =
+        next === "manual" ? "Switch to Auto" : "Switch to Manual";
+    });
+
+    // ── Keyboard movement ─────────────────────────────────────────────────
+    const KEY_MAP = {
+      ArrowLeft:  { pan: -1, tilt:  0 },
+      ArrowRight: { pan:  1, tilt:  0 },
+      ArrowUp:    { pan:  0, tilt: -1 },
+      ArrowDown:  { pan:  0, tilt:  1 },
+    };
+    const pressed = new Set();
+
+    document.addEventListener("keydown", (e) => {
+      if (e.repeat) return;
+
+      if (e.code === "Space") {
+        e.preventDefault();
+        socket.emit("fire");
+        flashScreen();
+        return;
+      }
+
+      const dir = KEY_MAP[e.code];
+      if (!dir) return;
+      e.preventDefault();
+      pressed.add(e.code);
+      sendMove();
+    });
+
+    document.addEventListener("keyup", (e) => {
+      pressed.delete(e.code);
+      sendMove();
+    });
+
+    function sendMove() {
+      let pan = 0, tilt = 0;
+      for (const key of pressed) {
+        const dir = KEY_MAP[key];
+        if (dir) { pan += dir.pan; tilt += dir.tilt; }
+      }
+      socket.emit("move", { pan, tilt });
+    }
+
+    function flashScreen() {
+      const el = document.getElementById("fire-flash");
+      el.style.display = "block";
+      setTimeout(() => { el.style.display = "none"; }, 150);
+    }
+  </script>
+</body>
+</html>

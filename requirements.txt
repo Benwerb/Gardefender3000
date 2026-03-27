@@ -10,4 +10,5 @@ adafruit-circuitpython-servokit
 
 # Web interface
 flask
+flask-socketio
 gunicorn
