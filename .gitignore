@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.pyo
-detections/
+detections/**
+!detections/.gitignore
 *.db
 *.log

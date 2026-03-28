@@ -78,9 +78,9 @@
 
     <!-- Detection gallery -->
     <div class="card bg-secondary text-light mt-3">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        Detection Gallery
-        <span class="badge bg-dark" id="detection-count">—</span>
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span>Detection Gallery <span class="badge bg-dark ms-1" id="detection-count">—</span></span>
+        <div id="class-filters" class="d-flex flex-wrap gap-1"></div>
       </div>
       <div class="card-body">
         <div id="detection-gallery" class="row g-2">
@@ -188,26 +188,60 @@
 
     // ── Detection gallery ───────────────────────────────────────────────
 
-    let selectedEvent = null;
+    let activeFilter = "all";
 
     async function refreshGallery() {
       try {
         const res = await fetch("/api/detections");
         const events = await res.json();
-        const gallery = document.getElementById("detection-gallery");
+        window._detectionEvents = events;
         document.getElementById("detection-count").textContent = events.length;
+        buildFilters(events);
+        renderGallery(events);
+      } catch (e) {
+        console.error("Gallery fetch failed", e);
+      }
+    }
 
-        if (!events.length) {
-          gallery.innerHTML = '<div class="col text-center text-white-50 py-3">No detections yet.</div>';
-          return;
-        }
+    function buildFilters(events) {
+      const classes = ["all", ...new Set(events.map(e => e.label))].sort();
+      const container = document.getElementById("class-filters");
+      // Only rebuild if classes changed
+      const existing = [...container.querySelectorAll("button")].map(b => b.dataset.label).join(",");
+      if (existing === classes.join(",")) return;
+      container.innerHTML = classes.map(c => `
+        <button class="btn btn-sm ${c === activeFilter ? 'btn-light' : 'btn-outline-light'}"
+                data-label="${c}"
+                onclick="setFilter('${c}')">
+          ${c === "all" ? "All" : c.charAt(0).toUpperCase() + c.slice(1)}
+        </button>
+      `).join("");
+    }
 
-        gallery.innerHTML = events.map((e, i) => `
+    function setFilter(label) {
+      activeFilter = label;
+      renderGallery(window._detectionEvents || []);
+      document.querySelectorAll("#class-filters button").forEach(btn => {
+        btn.className = `btn btn-sm ${btn.dataset.label === label ? "btn-light" : "btn-outline-light"}`;
+      });
+    }
+
+    function renderGallery(events) {
+      const gallery = document.getElementById("detection-gallery");
+      const filtered = activeFilter === "all" ? events : events.filter(e => e.label === activeFilter);
+
+      if (!filtered.length) {
+        gallery.innerHTML = '<div class="col text-center text-white-50 py-3">No detections yet.</div>';
+        return;
+      }
+
+      gallery.innerHTML = filtered.map((e, i) => {
+        const globalIndex = events.indexOf(e);
+        return `
           <div class="col-6 col-md-3 col-lg-2">
-            <div class="card bg-dark text-light h-100 detection-card"
+            <div class="card bg-dark text-light h-100"
                  style="cursor:pointer"
-                 onclick="openEvent(${i})"
-                 data-index="${i}">
+                 onclick="openEvent(${globalIndex})">
               <img src="/detections/${e.name}/${e.thumbnail}"
                    class="card-img-top"
                    style="object-fit:cover;height:100px;"
@@ -219,13 +253,8 @@
               </div>
             </div>
           </div>
-        `).join("");
-
-        // Store events for modal use
-        window._detectionEvents = events;
-      } catch (e) {
-        console.error("Gallery fetch failed", e);
-      }
+        `;
+      }).join("");
     }
 
     function openEvent(index) {
