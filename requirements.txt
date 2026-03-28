@@ -1,4 +1,4 @@
-# Core dependencies
+# Core dependencies (heavy ML packages — install system-wide or separately)
 opencv-python
 numpy
 ultralytics
