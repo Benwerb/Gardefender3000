@@ -73,8 +73,8 @@ def run_loop(state: dict, frame_lock: threading.Lock) -> None:
         22: "bear", 23: "zebra", 24: "giraffe",
     }
     MIN_CONFIDENCE = 0.65
-    MIN_BOX_AREA   = 500
-    MAX_BOX_AREA   = 200000
+    MIN_BOX_AREA   = 100
+    MAX_BOX_AREA   = 500000
 
     centered_frame_count = 0
 
