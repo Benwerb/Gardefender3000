@@ -67,8 +67,11 @@ def run_loop(state: dict, frame_lock: threading.Lock) -> None:
     model = YOLO(model_path)
 
     # ── Detection parameters ──────────────────────────────────────────────
-    TARGET_CLASSES = {0, 15, 16, 17}
-    CLASS_NAMES    = {0: "person", 15: "bird", 16: "cat", 17: "dog"}
+    CLASS_NAMES = {
+        0: "person", 15: "bird", 16: "cat", 17: "dog",
+        18: "horse", 19: "sheep", 20: "cow", 21: "elephant",
+        22: "bear", 23: "zebra", 24: "giraffe",
+    }
     MIN_CONFIDENCE = 0.30
     MIN_BOX_AREA   = 1500
     MAX_BOX_AREA   = 120000
@@ -90,8 +93,8 @@ def run_loop(state: dict, frame_lock: threading.Lock) -> None:
     frames_to_save_count = 0
     current_detection_folder = None
 
-    def is_valid_detection(x1, y1, x2, y2, conf, class_id):
-        if class_id not in TARGET_CLASSES:
+    def is_valid_detection(x1, y1, x2, y2, conf, class_id, target_classes):
+        if class_id not in target_classes:
             return False, "Not target class"
         if conf < MIN_CONFIDENCE:
             return False, "Low confidence"
@@ -108,10 +111,17 @@ def run_loop(state: dict, frame_lock: threading.Lock) -> None:
         return jpeg.tobytes()
 
     print("Garden defender loop starting…")
-    print(f"Target classes: {[CLASS_NAMES[c] for c in TARGET_CLASSES]}")
+
+    _last_frame_time = time.time()
 
     try:
         while state.get("running", True):
+            _now = time.time()
+            _dt  = _now - _last_frame_time
+            if _dt > 0:
+                state["fps"] = 1.0 / _dt
+            _last_frame_time = _now
+
             frame       = picam2.capture_array()
             frame_display = frame.copy()
             frame_small = cv2.resize(frame, (YOLO_SIZE, YOLO_SIZE))
@@ -119,6 +129,10 @@ def run_loop(state: dict, frame_lock: threading.Lock) -> None:
             scale_y     = frame.shape[0] / YOLO_SIZE
 
             post_fire_buffer.append(frame_display.copy())
+
+            # Write servo angles back to state for stats display
+            state["pan_angle"]  = pan_angle
+            state["tilt_angle"] = tilt_angle
 
             # Save post-fire frames
             if frames_to_save_count > 0:
@@ -185,12 +199,13 @@ def run_loop(state: dict, frame_lock: threading.Lock) -> None:
             classes = results[0].boxes.cls.cpu().numpy()
             confs   = results[0].boxes.conf.cpu().numpy()
 
+            target_classes = state.get("target_classes", set())
             valid_detections = []
             for i in range(len(boxes)):
                 class_id = int(classes[i])
-                if class_id in TARGET_CLASSES:
+                if class_id in target_classes:
                     x1, y1, x2, y2 = boxes[i]
-                    is_valid, reason = is_valid_detection(x1, y1, x2, y2, confs[i], class_id)
+                    is_valid, reason = is_valid_detection(x1, y1, x2, y2, confs[i], class_id, target_classes)
                     if is_valid:
                         valid_detections.append((boxes[i], confs[i], class_id))
                     else:

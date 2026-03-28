@@ -11,7 +11,10 @@
 
   <nav class="navbar navbar-dark bg-black px-3">
     <span class="navbar-brand fw-bold">Gardefender 3000</span>
-    <a href="{{ url_for('logout') }}" class="btn btn-sm btn-outline-secondary">Logout</a>
+    <div class="d-flex gap-2">
+      <a href="{{ url_for('manual') }}" class="btn btn-sm btn-outline-success">Manual Control</a>
+      <a href="{{ url_for('logout') }}" class="btn btn-sm btn-outline-secondary">Logout</a>
+    </div>
   </nav>
 
   <div class="container py-4">

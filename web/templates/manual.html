@@ -24,33 +24,49 @@
       transform: translate(-50%, -50%);
       pointer-events: none;
     }
+    /* Stats panel — bottom-left of video */
+    #stats-panel {
+      position: absolute;
+      bottom: 10px; left: 10px;
+      background: rgba(0,0,0,0.6);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.72rem;
+      font-family: monospace;
+      line-height: 1.6;
+      pointer-events: none;
+    }
+    /* Mode badge — top-right of video */
     #mode-badge {
       position: absolute;
-      top: 10px; left: 10px;
+      top: 10px; right: 10px;
       font-size: 0.8rem;
       padding: 3px 8px;
     }
     #hint {
       position: absolute;
-      bottom: 10px; left: 50%;
-      transform: translateX(-50%);
-      font-size: 0.75rem;
-      color: rgba(255,255,255,0.5);
+      bottom: 10px; right: 10px;
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.45);
       white-space: nowrap;
+      pointer-events: none;
     }
     .key-hint {
       display: inline-block;
       background: #333;
       border: 1px solid #555;
       border-radius: 4px;
-      padding: 1px 6px;
+      padding: 1px 5px;
       font-family: monospace;
-      font-size: 0.8rem;
     }
+    .preset-btn { min-width: 90px; }
+    .preset-btn.active { box-shadow: 0 0 0 2px #fff; }
   </style>
 </head>
 <body class="d-flex flex-column align-items-center justify-content-start min-vh-100 py-3">
 
+  <!-- Top bar -->
   <div class="d-flex align-items-center gap-3 mb-3 w-100" style="max-width:900px">
     <a href="{{ url_for('index') }}" class="btn btn-sm btn-outline-secondary">← Dashboard</a>
     <span class="fw-bold">Manual Control</span>
@@ -58,10 +74,23 @@
     <button id="mode-btn" class="btn btn-sm btn-warning">Switch to Auto</button>
   </div>
 
+  <!-- Target class selector -->
+  <div class="d-flex gap-2 mb-3 align-items-center" style="max-width:900px;width:100%">
+    <span class="text-white-50 small me-1">Target:</span>
+    {% for preset in presets %}
+    <button class="btn btn-sm btn-outline-light preset-btn {% if loop.first %}active{% endif %}"
+            data-preset="{{ preset }}"
+            onclick="selectPreset('{{ preset }}')">
+      {{ preset.title() }}
+    </button>
+    {% endfor %}
+  </div>
+
+  <!-- Video -->
   <div id="video-container">
     <img id="video-feed" src="{{ url_for('video_feed') }}" alt="Camera feed">
 
-    <!-- Crosshair overlay -->
+    <!-- Crosshair -->
     <svg id="crosshair" width="60" height="60" viewBox="0 0 60 60">
       <line x1="30" y1="0"  x2="30" y2="25" stroke="rgba(0,255,0,0.8)" stroke-width="1.5"/>
       <line x1="30" y1="35" x2="30" y2="60" stroke="rgba(0,255,0,0.8)" stroke-width="1.5"/>
@@ -70,8 +99,19 @@
       <circle cx="30" cy="30" r="5" fill="none" stroke="rgba(0,255,0,0.8)" stroke-width="1.5"/>
     </svg>
 
+    <!-- Stats overlay (bottom-left) -->
+    <div id="stats-panel">
+      <div>FPS: <span id="s-fps">—</span></div>
+      <div>CPU: <span id="s-cpu">—</span>%</div>
+      <div>Temp: <span id="s-temp">—</span>°C</div>
+      <div>Pan: <span id="s-pan">—</span>°</div>
+      <div>Tilt: <span id="s-tilt">—</span>°</div>
+    </div>
+
+    <!-- Mode badge (top-right) -->
     <span id="mode-badge" class="badge bg-success">MANUAL</span>
 
+    <!-- Key hint (bottom-right) -->
     <div id="hint">
       <span class="key-hint">←→</span> Pan &nbsp;
       <span class="key-hint">↑↓</span> Tilt &nbsp;
@@ -79,6 +119,7 @@
     </div>
   </div>
 
+  <!-- Fire flash overlay -->
   <div id="fire-flash"
        style="position:fixed;top:0;left:0;width:100%;height:100%;
               background:rgba(255,80,0,0.35);pointer-events:none;
@@ -90,12 +131,14 @@
   <script>
     const socket = io();
     let currentMode = "manual";
+    let activePreset = "{{ presets[0] }}";
 
     // ── Connection ────────────────────────────────────────────────────────
     socket.on("connect", () => {
       document.getElementById("conn-badge").textContent = "Connected";
       document.getElementById("conn-badge").className = "badge bg-success ms-auto";
       socket.emit("set_mode", { mode: "manual" });
+      socket.emit("set_classes", { preset: activePreset });
     });
 
     socket.on("disconnect", () => {
@@ -106,27 +149,40 @@
     socket.on("mode_changed", (data) => {
       currentMode = data.mode;
       const badge = document.getElementById("mode-badge");
+      const btn   = document.getElementById("mode-btn");
       if (data.mode === "manual") {
         badge.textContent = "MANUAL";
         badge.className = "badge bg-success";
+        btn.textContent = "Switch to Auto";
       } else {
         badge.textContent = "AUTO";
         badge.className = "badge bg-warning text-dark";
+        btn.textContent = "Switch to Manual";
       }
+    });
+
+    socket.on("classes_changed", (data) => {
+      activePreset = data.preset;
+      document.querySelectorAll(".preset-btn").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.preset === data.preset);
+      });
     });
 
     // ── Mode toggle ───────────────────────────────────────────────────────
     document.getElementById("mode-btn").addEventListener("click", () => {
       const next = currentMode === "manual" ? "auto" : "manual";
       socket.emit("set_mode", { mode: next });
-      document.getElementById("mode-btn").textContent =
-        next === "manual" ? "Switch to Auto" : "Switch to Manual";
     });
+
+    // ── Class preset selector ─────────────────────────────────────────────
+    function selectPreset(preset) {
+      socket.emit("set_classes", { preset });
+    }
 
     // ── Keyboard movement ─────────────────────────────────────────────────
     const KEY_MAP = {
-      ArrowLeft:  { pan: -1, tilt:  0 },
-      ArrowRight: { pan:  1, tilt:  0 },
+      ArrowLeft:  { pan:  1, tilt:  0 },
+      ArrowRight: { pan: -1, tilt:  0 },
       ArrowUp:    { pan:  0, tilt: -1 },
       ArrowDown:  { pan:  0, tilt:  1 },
     };
@@ -134,14 +190,12 @@
 
     document.addEventListener("keydown", (e) => {
       if (e.repeat) return;
-
       if (e.code === "Space") {
         e.preventDefault();
         socket.emit("fire");
         flashScreen();
         return;
       }
-
       const dir = KEY_MAP[e.code];
       if (!dir) return;
       e.preventDefault();
@@ -168,6 +222,24 @@
       el.style.display = "block";
       setTimeout(() => { el.style.display = "none"; }, 150);
     }
+
+    // ── Stats polling ─────────────────────────────────────────────────────
+    async function refreshStats() {
+      try {
+        const res  = await fetch("/api/stats");
+        const data = await res.json();
+        document.getElementById("s-fps").textContent  = data.fps   ?? "—";
+        document.getElementById("s-cpu").textContent  = data.cpu   ?? "—";
+        document.getElementById("s-temp").textContent = data.temp_c ?? "—";
+        document.getElementById("s-pan").textContent  = data.pan_angle  ?? "—";
+        document.getElementById("s-tilt").textContent = data.tilt_angle ?? "—";
+      } catch (e) {
+        console.error("Stats fetch failed", e);
+      }
+    }
+
+    refreshStats();
+    setInterval(refreshStats, 1000);
   </script>
 </body>
 </html>

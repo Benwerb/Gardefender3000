@@ -3,6 +3,7 @@ import os
 import threading
 import sqlite3
 import time
+import psutil
 from functools import wraps
 from pathlib import Path
 
@@ -16,14 +17,26 @@ from flask_socketio import SocketIO, emit
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import water_plants
 
+# COCO class presets (matches class IDs used in defendGarden.py)
+CLASS_PRESETS = {
+    "animals":    {15, 16, 17, 18, 19, 20, 21, 22, 23, 24},  # bird,cat,dog,horse,sheep,cow,elephant,bear,zebra,giraffe
+    "person":     {0},
+    "everything": {0, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24},  # animals + person
+}
+DEFAULT_CLASSES = CLASS_PRESETS["animals"].copy()
+
 # Shared state between Flask and the camera thread
 _state = {
-    "running":      False,
-    "mode":         "auto",   # "auto" | "manual"
-    "latest_frame": None,     # JPEG bytes
-    "moving_pan":   0,        # -1 / 0 / 1
-    "moving_tilt":  0,
-    "manual_fire":  False,
+    "running":        False,
+    "mode":           "auto",
+    "latest_frame":   None,
+    "moving_pan":     0,
+    "moving_tilt":    0,
+    "manual_fire":    False,
+    "target_classes": DEFAULT_CLASSES.copy(),
+    "fps":            0.0,
+    "pan_angle":      87,
+    "tilt_angle":     135,
 }
 _frame_lock = threading.Lock()
 _camera_thread = None
@@ -190,12 +203,34 @@ def create_app():
             mimetype="multipart/x-mixed-replace; boundary=frame",
         )
 
+    # ── Stats API ─────────────────────────────────────────────────────────
+
+    @app.route("/api/stats")
+    @login_required
+    def api_stats():
+        temp = None
+        try:
+            with open("/sys/class/thermal/thermal_zone0/temp") as f:
+                temp = round(int(f.read().strip()) / 1000, 1)
+        except OSError:
+            pass
+        return jsonify({
+            "fps":            round(_state.get("fps", 0), 1),
+            "cpu":            psutil.cpu_percent(),
+            "temp_c":         temp,
+            "pan_angle":      round(_state.get("pan_angle",  0)),
+            "tilt_angle":     round(_state.get("tilt_angle", 0)),
+            "mode":           _state.get("mode", "auto"),
+            "target_classes": list(_state.get("target_classes", [])),
+        })
+
     # ── Manual control page ───────────────────────────────────────────────
 
     @app.route("/manual")
     @login_required
     def manual():
-        return render_template("manual.html", mode=_state["mode"])
+        return render_template("manual.html", mode=_state["mode"],
+                               presets=list(CLASS_PRESETS.keys()))
 
     # ── SocketIO events ───────────────────────────────────────────────────
 
@@ -215,6 +250,13 @@ def create_app():
             return
         _state["moving_pan"]  = int(data.get("pan",  0))
         _state["moving_tilt"] = int(data.get("tilt", 0))
+
+    @socketio.on("set_classes")
+    def handle_set_classes(data):
+        preset = data.get("preset")
+        if preset in CLASS_PRESETS:
+            _state["target_classes"] = CLASS_PRESETS[preset].copy()
+            emit("classes_changed", {"preset": preset}, broadcast=True)
 
     @socketio.on("fire")
     def handle_fire():
