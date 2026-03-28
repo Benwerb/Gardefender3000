@@ -63,7 +63,8 @@ def run_loop(state: dict, frame_lock: threading.Lock) -> None:
     FIRE_COOLDOWN = 2  # seconds
 
     # ── YOLO model ────────────────────────────────────────────────────────
-    model = YOLO("yolo11n_ncnn_model")
+    model_path = os.environ.get("GARDEFENDER_MODEL", "yolo11n_ncnn_model")
+    model = YOLO(model_path)
 
     # ── Detection parameters ──────────────────────────────────────────────
     TARGET_CLASSES = {0, 15, 16, 17}
