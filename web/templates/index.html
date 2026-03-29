@@ -12,15 +12,15 @@
   <nav class="navbar navbar-dark bg-black px-3">
     <span class="navbar-brand fw-bold">Gardefender 3000</span>
     <div class="d-flex gap-2">
-      <a href="{{ url_for('manual') }}" class="btn btn-sm btn-outline-success">Manual Control</a>
+      <a href="{{ url_for('manual') }}" class="btn btn-sm btn-outline-success">Tower Defence</a>
       <a href="{{ url_for('logout') }}" class="btn btn-sm btn-outline-secondary">Logout</a>
     </div>
   </nav>
 
   <div class="container py-4">
 
-    <!-- Status card -->
-    <div class="row g-3 mb-4">
+    <!-- Status + Water Now -->
+    <div class="row g-3 mb-3">
       <div class="col-md-6">
         <div class="card bg-secondary text-light h-100">
           <div class="card-body">
@@ -33,7 +33,6 @@
         </div>
       </div>
 
-      <!-- Water now card -->
       <div class="col-md-6">
         <div class="card bg-secondary text-light h-100">
           <div class="card-body">
@@ -54,8 +53,38 @@
       </div>
     </div>
 
-    <!-- Log table -->
+    <!-- Watering Schedules -->
     <div class="card bg-secondary text-light mb-3">
+      <div class="card-header">Watering Schedules</div>
+      <div class="card-body">
+
+        <!-- Add schedule form -->
+        <form id="schedule-form" class="row g-2 align-items-end mb-3">
+          <div class="col-auto">
+            <label class="form-label small">Time</label>
+            <input type="time" id="sched-time" class="form-control form-control-sm bg-dark text-light border-secondary" required>
+          </div>
+          <div class="col">
+            <label class="form-label small">Duration: <strong id="sched-dur-label">60</strong>s</label>
+            <input type="range" class="form-range"
+                   id="sched-dur-slider" min="5" max="300" step="5" value="60"
+                   oninput="document.getElementById('sched-dur-label').textContent=this.value">
+          </div>
+          <div class="col-auto">
+            <button type="submit" class="btn btn-sm btn-success">Add Schedule</button>
+          </div>
+        </form>
+
+        <!-- Schedule list -->
+        <div id="schedule-list">
+          <div class="text-white-50 small">Loading…</div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Watering log -->
+    <div class="card bg-secondary text-light">
       <div class="card-header">Recent Watering Events</div>
       <div class="card-body p-0">
         <div style="max-height: 400px; overflow-y: auto;">
@@ -76,34 +105,6 @@
       </div>
     </div>
 
-    <!-- Detection gallery -->
-    <div class="card bg-secondary text-light mt-3">
-      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-        <span>Detection Gallery <span class="badge bg-dark ms-1" id="detection-count">—</span></span>
-        <div id="class-filters" class="d-flex flex-wrap gap-1"></div>
-      </div>
-      <div class="card-body">
-        <div id="detection-gallery" class="row g-2">
-          <div class="col text-center text-white-50 py-3">Loading…</div>
-        </div>
-      </div>
-    </div>
-
-  </div>
-
-  <!-- Detection event modal -->
-  <div class="modal fade" id="detection-modal" tabindex="-1">
-    <div class="modal-dialog modal-xl modal-dialog-scrollable">
-      <div class="modal-content bg-dark text-light">
-        <div class="modal-header border-secondary">
-          <h5 class="modal-title text-capitalize" id="modal-title"></h5>
-          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-        </div>
-        <div class="modal-body">
-          <div class="row g-2" id="modal-frames"></div>
-        </div>
-      </div>
-    </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -113,7 +114,7 @@
     function timeSince(isoStr) {
       if (!isoStr) return "Never";
       let s = isoStr.includes("T") ? isoStr : isoStr.replace(" ", "T");
-      if (!s.endsWith("Z") && !s.includes("+")) s += "Z"; // SQLite CURRENT_TIMESTAMP is UTC
+      if (!s.endsWith("Z") && !s.includes("+")) s += "Z";
       const d = new Date(s);
       const secs = Math.floor((Date.now() - d.getTime()) / 1000);
       if (secs < 60) return secs + "s ago";
@@ -122,47 +123,39 @@
       return Math.floor(secs / 86400) + "d ago";
     }
 
+    // ── Status ──────────────────────────────────────────────────────────
     async function refreshStatus() {
       try {
-        const res = await fetch("/api/status");
+        const res  = await fetch("/api/status");
         const data = await res.json();
         isWatering = data.is_watering;
-
         const badge = document.getElementById("status-badge");
         const btn   = document.getElementById("water-btn");
-
         if (isWatering) {
           badge.innerHTML = '<span class="text-warning">Watering in progress…</span>';
           btn.disabled = true;
           btn.textContent = "Watering…";
         } else {
-          badge.innerHTML = '<span class="text-success">Idle</span>';
+          badge.innerHTML = '<span class="text-white">Idle</span>';
           btn.disabled = false;
           btn.textContent = "Water Plants";
         }
-
         const lastEl = document.getElementById("last-watered-text");
-        if (data.last_watering) {
-          lastEl.textContent = "Last watered: " + timeSince(data.last_watering.timestamp);
-        } else {
-          lastEl.textContent = "No watering events yet.";
-        }
-      } catch (e) {
-        console.error("Status fetch failed", e);
-      }
+        lastEl.textContent = data.last_watering
+          ? "Last watered: " + timeSince(data.last_watering.timestamp)
+          : "No watering events yet.";
+      } catch (e) { console.error(e); }
     }
 
+    // ── Log ─────────────────────────────────────────────────────────────
     async function refreshLog() {
       try {
-        const res = await fetch("/api/log");
-        const rows = await res.json();
+        const rows  = await (await fetch("/api/log")).json();
         const tbody = document.getElementById("log-body");
-
         if (!rows.length) {
           tbody.innerHTML = '<tr><td colspan="4" class="text-center text-white-50 py-3">No events yet.</td></tr>';
           return;
         }
-
         tbody.innerHTML = rows.map(r => `
           <tr>
             <td>${timeSince(r.timestamp)}</td>
@@ -171,114 +164,67 @@
             <td>${r.success ? '<span class="text-success">OK</span>' : '<span class="text-danger">Failed</span>'}</td>
           </tr>
         `).join("");
-      } catch (e) {
-        console.error("Log fetch failed", e);
-      }
+      } catch (e) { console.error(e); }
     }
 
+    // ── Water now ────────────────────────────────────────────────────────
     document.getElementById("water-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       if (isWatering) return;
       const duration = document.getElementById("duration-slider").value;
-      const body = new URLSearchParams({ duration });
-      await fetch("/water", { method: "POST", body });
+      await fetch("/water", { method: "POST", body: new URLSearchParams({ duration }) });
       await refreshStatus();
       await refreshLog();
     });
 
-    // ── Detection gallery ───────────────────────────────────────────────
-
-    let activeFilter = "all";
-
-    async function refreshGallery() {
+    // ── Schedules ────────────────────────────────────────────────────────
+    async function refreshSchedules() {
       try {
-        const res = await fetch("/api/detections");
-        const events = await res.json();
-        window._detectionEvents = events;
-        document.getElementById("detection-count").textContent = events.length;
-        buildFilters(events);
-        renderGallery(events);
-      } catch (e) {
-        console.error("Gallery fetch failed", e);
-      }
-    }
-
-    function buildFilters(events) {
-      const classes = ["all", ...new Set(events.map(e => e.label))].sort();
-      const container = document.getElementById("class-filters");
-      // Only rebuild if classes changed
-      const existing = [...container.querySelectorAll("button")].map(b => b.dataset.label).join(",");
-      if (existing === classes.join(",")) return;
-      container.innerHTML = classes.map(c => `
-        <button class="btn btn-sm ${c === activeFilter ? 'btn-light' : 'btn-outline-light'}"
-                data-label="${c}"
-                onclick="setFilter('${c}')">
-          ${c === "all" ? "All" : c.charAt(0).toUpperCase() + c.slice(1)}
-        </button>
-      `).join("");
-    }
-
-    function setFilter(label) {
-      activeFilter = label;
-      renderGallery(window._detectionEvents || []);
-      document.querySelectorAll("#class-filters button").forEach(btn => {
-        btn.className = `btn btn-sm ${btn.dataset.label === label ? "btn-light" : "btn-outline-light"}`;
-      });
-    }
-
-    function renderGallery(events) {
-      const gallery = document.getElementById("detection-gallery");
-      const filtered = activeFilter === "all" ? events : events.filter(e => e.label === activeFilter);
-
-      if (!filtered.length) {
-        gallery.innerHTML = '<div class="col text-center text-white-50 py-3">No detections yet.</div>';
-        return;
-      }
-
-      gallery.innerHTML = filtered.map((e, i) => {
-        const globalIndex = events.indexOf(e);
-        return `
-          <div class="col-6 col-md-3 col-lg-2">
-            <div class="card bg-dark text-light h-100"
-                 style="cursor:pointer"
-                 onclick="openEvent(${globalIndex})">
-              <img src="/detections/${e.name}/${e.thumbnail}"
-                   class="card-img-top"
-                   style="object-fit:cover;height:100px;"
-                   loading="lazy">
-              <div class="card-body p-1">
-                <div class="fw-semibold text-capitalize small">${e.label}</div>
-                <div class="text-white-50" style="font-size:0.7rem">${e.timestamp}</div>
-                <div class="text-white-50" style="font-size:0.7rem">${e.frames.length} frames</div>
-              </div>
-            </div>
+        const schedules = await (await fetch("/api/schedules")).json();
+        const el = document.getElementById("schedule-list");
+        if (!schedules.length) {
+          el.innerHTML = '<div class="text-white-50 small">No schedules set.</div>';
+          return;
+        }
+        el.innerHTML = schedules.map(s => `
+          <div class="d-flex justify-content-between align-items-center border-bottom border-dark py-2">
+            <span>
+              <strong>${String(s.hour).padStart(2,"0")}:${String(s.minute).padStart(2,"0")}</strong>
+              &nbsp;—&nbsp; ${s.duration_sec}s
+            </span>
+            <button class="btn btn-sm btn-outline-danger" onclick="deleteSchedule(${s.id})">Remove</button>
           </div>
-        `;
-      }).join("");
+        `).join("");
+      } catch (e) { console.error(e); }
     }
 
-    function openEvent(index) {
-      const e = window._detectionEvents[index];
-      const modal = document.getElementById("detection-modal");
-      document.getElementById("modal-title").textContent = e.label + " — " + e.timestamp;
-      document.getElementById("modal-frames").innerHTML = e.frames.map(f => `
-        <div class="col-6 col-md-4">
-          <img src="/detections/${e.name}/${f}"
-               class="img-fluid rounded"
-               loading="lazy">
-        </div>
-      `).join("");
-      new bootstrap.Modal(modal).show();
+    document.getElementById("schedule-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const time     = document.getElementById("sched-time").value;       // "HH:MM"
+      const duration = document.getElementById("sched-dur-slider").value;
+      if (!time) return;
+      const [hour, minute] = time.split(":").map(Number);
+      await fetch("/api/schedules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hour, minute, duration_sec: Number(duration) }),
+      });
+      document.getElementById("sched-time").value = "";
+      await refreshSchedules();
+    });
+
+    async function deleteSchedule(id) {
+      await fetch(`/api/schedules/${id}`, { method: "DELETE" });
+      await refreshSchedules();
     }
 
-    // Initial load + poll every 5s
+    // ── Poll ─────────────────────────────────────────────────────────────
     refreshStatus();
     refreshLog();
-    refreshGallery();
+    refreshSchedules();
     setInterval(async () => {
       await refreshStatus();
       await refreshLog();
-      await refreshGallery();
     }, 5000);
   </script>
 

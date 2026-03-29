@@ -6,6 +6,7 @@ import time
 import psutil
 from functools import wraps
 from pathlib import Path
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from flask import (
     Flask, render_template, request, redirect,
@@ -71,11 +72,17 @@ def create_app():
     app.config["DETECTIONS_PATH"] = DETECTIONS_PATH
 
     water_plants.init_db(Path(DATABASE_PATH))
+    _init_schedule_db(Path(DATABASE_PATH))
     _start_camera_thread()
 
     # Thread-safe watering state
     _water_lock = threading.Lock()
     _water_state = {"is_watering": False}
+
+    # Scheduler
+    scheduler = BackgroundScheduler()
+    scheduler.start()
+    _load_schedules(scheduler, Path(DATABASE_PATH), _water_lock, _water_state)
 
     # ── Auth ──────────────────────────────────────────────────────────────
 
@@ -224,6 +231,35 @@ def create_app():
             "target_classes": list(_state.get("target_classes", [])),
         })
 
+    # ── Schedule API ──────────────────────────────────────────────────────
+
+    @app.route("/api/schedules", methods=["GET"])
+    @login_required
+    def api_get_schedules():
+        return jsonify(_get_schedules(Path(app.config["DATABASE_PATH"])))
+
+    @app.route("/api/schedules", methods=["POST"])
+    @login_required
+    def api_add_schedule():
+        data = request.get_json()
+        hour        = int(data["hour"])
+        minute      = int(data["minute"])
+        duration    = int(data["duration_sec"])
+        db_path     = Path(app.config["DATABASE_PATH"])
+        schedule_id = _save_schedule(db_path, hour, minute, duration)
+        _add_scheduler_job(scheduler, schedule_id, hour, minute, duration,
+                           db_path, _water_lock, _water_state)
+        return jsonify({"id": schedule_id}), 201
+
+    @app.route("/api/schedules/<int:schedule_id>", methods=["DELETE"])
+    @login_required
+    def api_delete_schedule(schedule_id):
+        _delete_schedule(Path(app.config["DATABASE_PATH"]), schedule_id)
+        job_id = f"water_{schedule_id}"
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+        return jsonify({"status": "deleted"})
+
     # ── Manual control page ───────────────────────────────────────────────
 
     @app.route("/manual")
@@ -290,3 +326,76 @@ def _get_recent_waterings(db_path: Path, limit: int = 50):
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:
         return []
+
+
+# ── Schedule DB helpers ───────────────────────────────────────────────────
+
+def _init_schedule_db(db_path: Path):
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS water_schedules (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                hour         INTEGER NOT NULL,
+                minute       INTEGER NOT NULL,
+                duration_sec INTEGER NOT NULL
+            )
+        """)
+        conn.commit()
+
+
+def _get_schedules(db_path: Path):
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM water_schedules ORDER BY hour, minute"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.OperationalError:
+        return []
+
+
+def _save_schedule(db_path: Path, hour: int, minute: int, duration_sec: int) -> int:
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO water_schedules (hour, minute, duration_sec) VALUES (?, ?, ?)",
+            (hour, minute, duration_sec),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def _delete_schedule(db_path: Path, schedule_id: int):
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM water_schedules WHERE id = ?", (schedule_id,))
+        conn.commit()
+
+
+def _add_scheduler_job(scheduler, schedule_id, hour, minute, duration_sec,
+                       db_path, water_lock, water_state):
+    def _job():
+        with water_lock:
+            if water_state["is_watering"]:
+                return
+            water_state["is_watering"] = True
+        try:
+            water_plants.water(duration=duration_sec, trigger_type="schedule",
+                               db_path=db_path)
+        finally:
+            with water_lock:
+                water_state["is_watering"] = False
+
+    scheduler.add_job(
+        _job,
+        trigger="cron",
+        hour=hour,
+        minute=minute,
+        id=f"water_{schedule_id}",
+        replace_existing=True,
+    )
+
+
+def _load_schedules(scheduler, db_path, water_lock, water_state):
+    for s in _get_schedules(db_path):
+        _add_scheduler_job(scheduler, s["id"], s["hour"], s["minute"],
+                           s["duration_sec"], db_path, water_lock, water_state)

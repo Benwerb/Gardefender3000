@@ -12,3 +12,4 @@ adafruit-circuitpython-servokit
 flask
 flask-socketio
 gunicorn
+APScheduler
