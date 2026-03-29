@@ -6,7 +6,10 @@ import time
 import psutil
 from functools import wraps
 from pathlib import Path
-from apscheduler.schedulers.background import BackgroundScheduler
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler  # v3
+except ImportError:
+    from apscheduler import BackgroundScheduler  # v4
 
 from flask import (
     Flask, render_template, request, redirect,
