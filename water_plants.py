@@ -24,11 +24,13 @@ from pathlib import Path
 
 # ── Try importing GPIO; fall back to a stub for dev/testing on non-Pi hardware ──
 try:
-    import RPi.GPIO as GPIO
+    from gpiozero import OutputDevice
     ON_PI = True
 except (ImportError, RuntimeError):
     ON_PI = False
-    logging.warning("RPi.GPIO not available — running in simulation mode.")
+    logging.warning("gpiozero not available — running in simulation mode.")
+
+_valve_device = None
 
 
 # ─────────────────────────────────────────────
@@ -109,28 +111,33 @@ def log_event(
 # ─────────────────────────────────────────────
 
 def _setup_gpio() -> None:
+    global ON_PI, _valve_device
     if not ON_PI:
         return
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setwarnings(False)
-    GPIO.setup(VALVE_PIN, GPIO.OUT, initial=GPIO.LOW)
+    try:
+        _valve_device = OutputDevice(VALVE_PIN, active_high=True, initial_value=False)
+    except Exception as exc:
+        log.warning("GPIO setup failed (%s) — falling back to simulation mode.", exc)
+        ON_PI = False
 
 
 def _valve_open() -> None:
-    if ON_PI:
-        GPIO.output(VALVE_PIN, GPIO.HIGH)
+    if _valve_device:
+        _valve_device.on()
     log.info("Valve OPEN  (pin %d → HIGH)", VALVE_PIN)
 
 
 def _valve_close() -> None:
-    if ON_PI:
-        GPIO.output(VALVE_PIN, GPIO.LOW)
+    if _valve_device:
+        _valve_device.off()
     log.info("Valve CLOSE (pin %d → LOW)", VALVE_PIN)
 
 
 def _cleanup_gpio() -> None:
-    if ON_PI:
-        GPIO.cleanup(VALVE_PIN)
+    global _valve_device
+    if _valve_device:
+        _valve_device.close()
+        _valve_device = None
 
 
 # ─────────────────────────────────────────────
